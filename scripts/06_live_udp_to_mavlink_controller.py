@@ -257,7 +257,7 @@ def compute_target_command(packet, args):
     error_x_db = sign_preserving_deadband(error_x, args.yaw_deadband)
     distance_error_db = sign_preserving_deadband(distance_error, args.forward_deadband)
 
-    target_r = args.k_yaw * error_x_db
+    target_r = args.yaw_sign * args.k_yaw * error_x_db
     target_x = args.k_forward * distance_error_db
 
     target_x = clamp(target_x, -args.max_x, args.max_x)
@@ -371,6 +371,12 @@ def main():
 
     parser.add_argument("--k-forward", type=float, default=100.0)
     parser.add_argument("--k-yaw", type=float, default=120.0)
+    parser.add_argument(
+    "--yaw-sign",
+    type=float,
+    default=1.0,
+    help="Yaw command sign. Use 1.0 for normal mapping, -1.0 to invert yaw direction."
+)
 
     parser.add_argument("--max-x", type=float, default=120.0)
     parser.add_argument("--max-r", type=float, default=120.0)
@@ -407,6 +413,7 @@ def main():
     print(f"desired_distance         : {args.desired_distance}")
     print(f"k_forward                : {args.k_forward}")
     print(f"k_yaw                    : {args.k_yaw}")
+    print(f"yaw_sign                 : {args.yaw_sign}")
     print(f"max_x                    : {args.max_x}")
     print(f"max_r                    : {args.max_r}")
     print(f"yaw_deadband             : {args.yaw_deadband}")

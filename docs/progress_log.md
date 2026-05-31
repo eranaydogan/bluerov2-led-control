@@ -805,3 +805,148 @@ The final controller should:
 * support multiple LED faces,
 * support future Unity and Unreal visual environments.
 
+
+Controller V2 Arms-Off Test
+
+The clean constant-ON video was streamed to the Linux controller using UDP. The controller was run without arming.
+
+The controller correctly produced:
+
+TRACK
+INVALID_DECAY
+INVALID_STOP
+target command
+smoothed command
+MANUAL_CONTROL command
+
+The yaw response matched the image error:
+
+error_x positive → r positive
+error_x negative → r negative
+
+The forward response also matched the estimated distance:
+
+estimated_distance > desired_distance → x positive
+estimated_distance < desired_distance → x negative
+
+The controller deadband worked correctly near the final centered region:
+
+small error_x + distance near 3.0 → target=(0,0), cmd=(0,0,500,0)
+Controller V2 Armed Test
+
+A short armed Gazebo test was performed with the clean constant-ON video.
+
+First armed test parameters:
+
+k_forward = 90
+k_yaw     = 110
+max_x     = 100
+max_r     = 100
+
+Result:
+
+- Robot moved in Gazebo.
+- STOP and DISARM completed safely.
+- Yaw response was visually too aggressive.
+
+Reason:
+
+The test still used an offline video. Therefore, the robot motion in Gazebo did not update the image error. When error_x stayed negative for a long period, the controller continued to command yaw, causing excessive rotation.
+
+A lower-yaw armed test was then performed.
+
+Second armed test parameters:
+
+k_forward = 80
+k_yaw     = 55
+yaw_sign  = 1
+max_x     = 90
+max_r     = 45
+yaw_deadband = 0.08
+forward_deadband = 0.20
+ema_alpha = 0.25
+max_delta_x_per_sec = 160
+max_delta_r_per_sec = 90
+
+Result:
+
+- Robot response was less aggressive.
+- Yaw was still visually larger than ideal.
+- This is expected because the input video is offline and the visual error cannot close.
+- STOP and DISARM worked safely.
+
+Conclusion:
+
+The controller and vision-to-control pipeline are working. However, yaw tuning cannot be finalized using offline video because the image does not update in response to Gazebo motion.
+
+Control-Side Update
+
+The controller was extended with a yaw sign parameter:
+
+--yaw-sign 1
+--yaw-sign -1
+
+Current mapping:
+
+error_x > 0 → r positive
+error_x < 0 → r negative
+
+This mapping must be revalidated during live closed-loop testing. If the robot turns away from the target instead of reducing image error, the controller can be run with:
+
+--yaw-sign -1
+
+without changing the code.
+
+Current Milestone
+
+The following chain has now been validated:
+
+Unity recorded constant-ON video
+→ OpenCV sender V2
+→ V2 LED pair selection
+→ UDP observation packet
+→ Linux controller V2
+→ smoothing / deadband / invalid decay
+→ MAVLink MANUAL_CONTROL
+→ Gazebo BlueROV2 motion
+→ STOP + DISARM
+
+This is still offline video-based integration, not true closed-loop tracking.
+
+Main Conclusion
+
+The constant-ON dataset improved observation quality and reduced blink-related target loss. The V2 debug overlay confirmed that the selected LED pair is generally correct. Controller V2 successfully generated smooth forward/yaw commands and safely controlled the Gazebo vehicle.
+
+The remaining limitation is that the input video is offline. Because the camera image does not update when the Gazebo robot moves, the controller cannot actually reduce the visual error. This makes yaw appear excessive in armed tests.
+
+The next major step is live Unity or Unreal image capture.
+
+Next Step
+
+Move from recorded video to live visual input:
+
+Unity live Game View / camera render
+→ OpenCV live frame processing
+→ UDP observation packet
+→ Linux controller V2
+→ Gazebo BlueROV2 motion
+
+Initial live closed-loop controller parameters should be conservative:
+
+k_forward = 70
+k_yaw = 35
+max_x = 70
+max_r = 30
+yaw_deadband = 0.10
+forward_deadband = 0.25
+ema_alpha = 0.20
+max_delta_x_per_sec = 120
+max_delta_r_per_sec = 60
+
+The first live test should verify:
+
+- Does error_x decrease when yaw command is applied?
+- Is yaw_sign correct?
+- Does estimated_distance move toward the desired distance?
+- Does target loss trigger INVALID_DECAY / INVALID_STOP?
+- Does STOP + DISARM always work?
