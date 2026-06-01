@@ -950,3 +950,52 @@ The first live test should verify:
 - Does estimated_distance move toward the desired distance?
 - Does target loss trigger INVALID_DECAY / INVALID_STOP?
 - Does STOP + DISARM always work?
+
+
+
+## Progress Update — Unity Camera Pose Bridge Initial Validation
+
+The Unity `CV_Test_Camera` was connected to a separate UDP pose receiver using port `5008`, while the leader robot kept its own receiver on port `5007`. This separation prevents port conflicts between the manually controlled leader object and the camera/follower visual pose.
+
+The `GazeboDataReceiver` component was added to `CV_Test_Camera` with the following working test configuration:
+
+```text
+Listen Port              = 5008
+Position Scale           = 1
+Force Unity Start Pose   = false
+Use Local Transform      = true
+Keyboard Relative Mode   = true
+
+Interpolation Delay      = 0.025
+Max Buffer Samples       = 120
+
+Use Smoothing            = true
+Position Smooth Time     = 0.045
+Rotation Smooth Speed    = 12
+Position Deadband        = 0.0015
+Rotation Deadband Deg    = 0.05
+```
+
+A Linux-to-Windows UDP test confirmed that Unity receives 9-float pose packets on port `5008` and that `CV_Test_Camera` can be moved through the receiver.
+
+The current Linux pose bridge test uses:
+
+```bash
+--rate 90
+--scale 0.40
+--yaw-only
+```
+
+Initial observation:
+
+```text
+- UDP 5008 communication works.
+- CV_Test_Camera moves from external pose packets.
+- Yaw direction appears to be correctly matched between Gazebo and Unity.
+- Position axes are not yet fully aligned.
+```
+
+Important note:
+
+The next required calibration step is to fix the translation-axis mapping between Gazebo/MAVLink `LOCAL_POSITION_NED` and Unity camera motion. Yaw mapping should be preserved for now because the observed yaw direction is currently correct.
+

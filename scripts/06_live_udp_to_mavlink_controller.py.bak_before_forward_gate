@@ -263,25 +263,6 @@ def compute_target_command(packet, args):
     target_x = clamp(target_x, -args.max_x, args.max_x)
     target_r = clamp(target_r, -args.max_r, args.max_r)
 
-    # Yaw-priority / forward-gating:
-    # If the visual target is far from image center, reduce or stop forward motion.
-    # This prevents the robot from moving forward while the target is still far left/right.
-    abs_error_x = abs(error_x)
-
-    if args.forward_gate_stop_error > 0.0 and abs_error_x >= args.forward_gate_stop_error:
-        target_x = 0.0
-    elif args.forward_gate_slow_error > 0.0 and abs_error_x >= args.forward_gate_slow_error:
-        target_x *= args.forward_gate_min_scale
-    elif args.forward_gate_start_error > 0.0 and abs_error_x >= args.forward_gate_start_error:
-        target_x *= args.forward_gate_mid_scale
-
-    # Held observations are stale visual measurements.
-    # Scale only the command targets; keep raw error_x unchanged for logging/analysis.
-    held = packet_bool(packet.get("held_observation", packet.get("held", False)))
-    if held:
-        target_x *= args.held_forward_scale
-        target_r *= args.held_yaw_scale
-
     return target_x, target_r, error_x, distance_error
 
 
@@ -297,14 +278,6 @@ def round_manual_command(value):
     if value < 0.0:
         return int(math.ceil(value - 0.5))
     return 0
-
-
-def packet_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "y")
-    return bool(value)
 
 
 class CommandFilter:
@@ -425,15 +398,6 @@ def main():
 
     parser.add_argument("--yaw-deadband", type=float, default=0.04)
     parser.add_argument("--forward-deadband", type=float, default=0.15)
-
-    parser.add_argument("--forward-gate-start-error", type=float, default=0.12)
-    parser.add_argument("--forward-gate-slow-error", type=float, default=0.20)
-    parser.add_argument("--forward-gate-stop-error", type=float, default=0.30)
-    parser.add_argument("--forward-gate-mid-scale", type=float, default=0.60)
-    parser.add_argument("--forward-gate-min-scale", type=float, default=0.30)
-
-    parser.add_argument("--held-forward-scale", type=float, default=0.0)
-    parser.add_argument("--held-yaw-scale", type=float, default=0.4)
 
     parser.add_argument("--ema-alpha", type=float, default=0.25)
 
