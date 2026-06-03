@@ -999,3 +999,201 @@ Important note:
 
 The next required calibration step is to fix the translation-axis mapping between Gazebo/MAVLink `LOCAL_POSITION_NED` and Unity camera motion. Yaw mapping should be preserved for now because the observed yaw direction is currently correct.
 
+
+# Progress Log — Control / BlueROV2 LED Control Repository
+
+## Gazebo → Unity Pose Bridge and Yaw Control Tests
+
+The Gazebo / ArduSub / Unity / OpenCV / controller pipeline has been tested through multiple stages.
+
+The validated integration chain is:
+
+```text
+Gazebo BlueROV2 / ArduSub
+→ MAVLink pose output
+→ 08_mavlink_pose_to_unity.py
+→ UDP pose packet to Unity
+→ CV_Test_Camera movement in Unity
+→ Unity Game View live capture
+→ OpenCV BACK LED observation
+→ UDP observation packet to Linux controller
+→ MAVLink MANUAL_CONTROL
+→ Gazebo BlueROV2 yaw motion
+```
+
+## Unity Pose Receiver
+
+Unity receives Gazebo pose data on:
+
+```text
+UDP port: 5008
+```
+
+The receiver script is attached to:
+
+```text
+CV_Test_Camera
+```
+
+A Windows firewall rule was added for UDP port 5008.
+
+Important note:
+
+```text
+The Windows IP address can change depending on Wi-Fi / mobile hotspot / local network.
+Always verify the current Windows IP using ipconfig before starting the pose bridge.
+```
+
+## Controller V2 Updates
+
+`06_live_udp_to_mavlink_controller.py` was extended with held-observation scaling.
+
+New / important options:
+
+```text
+--held-forward-scale
+--held-yaw-scale
+```
+
+Held observations are stale visual measurements. The controller now scales command targets during held observations while keeping the raw `error_x` unchanged for logging and analysis.
+
+Confirmed JSON field:
+
+```text
+held_observation
+```
+
+The sender uses `held_observation=True/False`, and the controller reads the same key.
+
+## Distance Confidence Threshold Alignment
+
+A critical issue was found and fixed:
+
+```text
+The sender and controller both have their own min-distance-confidence thresholds.
+```
+
+If the sender uses:
+
+```text
+--min-distance-confidence 0.40
+```
+
+but the controller remains at the old default:
+
+```text
+--min-distance-confidence 0.60
+```
+
+then the sender may transmit packets as valid, while the controller rejects them as `LOW_DISTANCE_CONFIDENCE`.
+
+Current yaw-test baseline requires both sides to use:
+
+```text
+--min-distance-confidence 0.40
+```
+
+## Yaw-Only Pulse Test Script
+
+A new yaw-only diagnostic script was added:
+
+```text
+scripts/09_yaw_only_pulse_test.py
+```
+
+Purpose:
+
+```text
+- Send only yaw MANUAL_CONTROL commands.
+- Keep x=0, y=0, z=500 fixed.
+- Avoid forward/backward movement during visual yaw diagnostics.
+```
+
+Safe diagnostic pulse found:
+
+```text
+r=8
+duration=0.5 s
+pause=3.0 s
+```
+
+Larger commands were too aggressive:
+
+```text
+r=80, duration=3.0 s:
+  Too large. Target left the field of view.
+
+r=20, duration=1.0 s:
+  Still too large. Target moved close to the image edge.
+```
+
+## Yaw Controller Tuning
+
+The yaw sign was validated:
+
+```text
+error_x > 0 → positive yaw command
+error_x < 0 → negative yaw command
+```
+
+The high-authority yaw tests confirmed that the previous issue was not yaw sign, but excessive yaw authority and stale/lost observations.
+
+Current preferred yaw baseline:
+
+```text
+k_yaw = 30
+max_r = 12
+yaw_sign = 1
+yaw_deadband = 0.04
+ema_alpha = 0.30
+max_delta_r_per_sec = 80
+held_yaw_scale = 0.4
+min_distance_confidence = 0.40
+```
+
+Alternative held yaw scales were tested:
+
+```text
+held_yaw_scale = 0.2:
+  Reduced stale-frame command strength, but became more passive and fragmented.
+
+held_yaw_scale = 0.3:
+  Gave acceptable first convergence, but later positive residual drift appeared in the test run.
+
+held_yaw_scale = 0.4:
+  Current preferred baseline because it provides stronger recovery and stable final centering.
+```
+
+D control is not added yet.
+
+Reason:
+
+```text
+The current remaining issue is not mainly a classical yaw oscillation problem.
+It is mostly caused by visual packet loss / held observations / target movement near the field of view boundary.
+```
+
+## Current Milestone
+
+Yaw-only closed-loop control is now considered usable for the next phase.
+
+Validated:
+
+```text
+- yaw sign
+- safe yaw authority
+- held observation scaling
+- sender/controller confidence threshold alignment
+- STOP and DISARM safety
+```
+
+Remaining before full forward tracking:
+
+```text
+- switch pose bridge from yaw-only to full pose
+- verify forward motion changes Unity camera distance correctly
+- verify pixel_distance increases when the follower moves forward
+- verify estimated_distance decreases when moving forward
+- add forward control with strong yaw gate and conservative gains
+```
+
