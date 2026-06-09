@@ -247,17 +247,92 @@ def validate_observation(packet, args):
 
     return True, "OK"
 
+_yaw_d_state = {
+    "prev_error_x_smooth": None,
+    "error_x_smooth": None,
+}
 
-def compute_target_command(packet, args):
+def compute_target_command(packet, args, dt):
     error_x = float(packet["error_norm"][0])
     estimated_distance = float(packet["estimated_distance"])
 
     distance_error = estimated_distance - args.desired_distance
 
+    # ------------------------------------------------------------
+    # Yaw D term:
+    # Smooth error_x first, then differentiate the smoothed signal.
+    # This avoids amplifying single-frame OpenCV noise.
+    # ------------------------------------------------------------
+    alpha_error = clamp(args.error_ema_alpha, 0.0, 1.0)
+
+    if _yaw_d_state["error_x_smooth"] is None:
+        _yaw_d_state["error_x_smooth"] = error_x
+
+    error_x_smooth = (
+        alpha_error * error_x
+        + (1.0 - alpha_error) * _yaw_d_state["error_x_smooth"]
+    )
+
+    prev_error_x_smooth = _yaw_d_state["prev_error_x_smooth"]
+
+    if prev_error_x_smooth is None or dt <= 0.0:
+        error_x_rate = 0.0
+    else:
+        error_x_rate = (error_x_smooth - prev_error_x_smooth) / dt
+
+    _yaw_d_state["prev_error_x_smooth"] = error_x_smooth
+    _yaw_d_state["error_x_smooth"] = error_x_smooth
+
     error_x_db = sign_preserving_deadband(error_x, args.yaw_deadband)
     distance_error_db = sign_preserving_deadband(distance_error, args.forward_deadband)
 
-    target_r = args.yaw_sign * args.k_yaw * error_x_db
+    # P + D yaw control.
+    #
+    # IMPORTANT SIGN:
+    # If error_x > 0 and the robot turns correctly, error_x decreases,
+    # so error_x_rate becomes negative.
+    # With "+ k_yaw_d * error_x_rate", the D term reduces yaw command
+    # while approaching the center, damping overshoot.
+    # Distance-dependent yaw gain:
+    # Far target  -> weaker yaw to reduce oscillation/noisy correction.
+    # Near target -> full yaw gain for precise centering.
+    if args.yaw_gain_distance_enable:
+        near_d = args.yaw_gain_near_distance
+        far_d = args.yaw_gain_far_distance
+
+        if far_d <= near_d:
+            yaw_gain_scale = 1.0
+        else:
+            t = (far_d - estimated_distance) / (far_d - near_d)
+            t = clamp(t, 0.0, 1.0)
+
+            yaw_gain_scale = (
+                args.yaw_gain_far_scale
+                + t * (args.yaw_gain_near_scale - args.yaw_gain_far_scale)
+            )
+    else:
+        yaw_gain_scale = 1.0
+
+    effective_k_yaw = args.k_yaw * yaw_gain_scale
+    effective_k_yaw_d = args.k_yaw_d * yaw_gain_scale
+
+    target_r = args.yaw_sign * (
+        effective_k_yaw * error_x_db
+        + effective_k_yaw_d * error_x_rate
+    )
+
+    # Yaw reverse guard:
+    # When the target is clearly off-center, the D term may reduce/brake yaw,
+    # but it must not actively turn the robot away from the target.
+    # Uses raw error_x sign, not deadbanded error_x.
+    if args.yaw_reverse_guard_error > 0.0 and abs(error_x) > args.yaw_reverse_guard_error:
+        desired_dir = args.yaw_sign * error_x
+
+        if desired_dir > 0.0 and target_r < 0.0:
+            target_r = 0.0
+        elif desired_dir < 0.0 and target_r > 0.0:
+            target_r = 0.0
+
     target_x = args.k_forward * distance_error_db
 
     target_x = clamp(target_x, -args.max_x, args.max_x)
@@ -265,18 +340,71 @@ def compute_target_command(packet, args):
 
     # Yaw-priority / forward-gating:
     # If the visual target is far from image center, reduce or stop forward motion.
-    # This prevents the robot from moving forward while the target is still far left/right.
     abs_error_x = abs(error_x)
 
-    if args.forward_gate_stop_error > 0.0 and abs_error_x >= args.forward_gate_stop_error:
-        target_x = 0.0
-    elif args.forward_gate_slow_error > 0.0 and abs_error_x >= args.forward_gate_slow_error:
-        target_x *= args.forward_gate_min_scale
-    elif args.forward_gate_start_error > 0.0 and abs_error_x >= args.forward_gate_start_error:
-        target_x *= args.forward_gate_mid_scale
+    gate_mid_scale = args.forward_gate_mid_scale
+    gate_min_scale = args.forward_gate_min_scale
 
+    if args.forward_gate_distance_enable:
+        near_d = args.forward_gate_near_distance
+        far_d = args.forward_gate_far_distance
+
+        if far_d > near_d:
+            t = (estimated_distance - near_d) / (far_d - near_d)
+            t = clamp(t, 0.0, 1.0)
+
+            gate_mid_scale = (
+                args.forward_gate_mid_scale
+                + t * (args.forward_gate_far_mid_scale - args.forward_gate_mid_scale)
+            )
+
+            gate_min_scale = (
+                args.forward_gate_min_scale
+                + t * (args.forward_gate_far_min_scale - args.forward_gate_min_scale)
+            )
+
+
+    if abs(error_x) >= args.forward_gate_stop_error:
+        forward_gate_scale = gate_min_scale
+    elif abs(error_x) >= args.forward_gate_slow_error:
+        forward_gate_scale = gate_mid_scale
+    elif abs(error_x) >= args.forward_gate_start_error:
+        forward_gate_scale = gate_mid_scale
+    else:
+        forward_gate_scale = 1.0
+
+    # Apply yaw-priority forward gate.
+    # Only reduce positive forward motion; do not weaken backward correction if too close.
+    if target_x > 0.0:
+        target_x *= forward_gate_scale
+
+
+    # Distance-dependent forward boost:
+    # Far target  -> allow stronger forward motion.
+    # Near target -> no boost, keep precise/slow approach.
+    if args.forward_boost_distance_enable and distance_error > 0.0 and target_x > 0.0:
+        near_d = args.forward_boost_near_distance
+        far_d = args.forward_boost_far_distance
+
+        if far_d <= near_d:
+            forward_boost_scale = 1.0
+        else:
+            t = (estimated_distance - near_d) / (far_d - near_d)
+            t = clamp(t, 0.0, 1.0)
+
+            forward_boost_scale = (
+                args.forward_boost_near_scale
+                + t * (args.forward_boost_far_scale - args.forward_boost_near_scale)
+            )
+
+        target_x = clamp(
+            target_x * forward_boost_scale,
+            0.0,
+            args.max_x,
+        )
+    
     # Held observations are stale visual measurements.
-    # Scale only the command targets; keep raw error_x unchanged for logging/analysis.
+    # Apply held scaling LAST so stale packets cannot be boosted again.
     held = packet_bool(packet.get("held_observation", packet.get("held", False)))
     if held:
         target_x *= args.held_forward_scale
@@ -409,11 +537,11 @@ def main():
     parser.add_argument("--k-forward", type=float, default=100.0)
     parser.add_argument("--k-yaw", type=float, default=120.0)
     parser.add_argument(
-    "--yaw-sign",
-    type=float,
-    default=1.0,
-    help="Yaw command sign. Use 1.0 for normal mapping, -1.0 to invert yaw direction."
-)
+        "--yaw-sign",
+        type=float,
+        default=1.0,
+        help="Yaw command sign. Use 1.0 for normal mapping, -1.0 to invert yaw direction."
+    )
 
     parser.add_argument("--max-x", type=float, default=120.0)
     parser.add_argument("--max-r", type=float, default=120.0)
@@ -436,6 +564,60 @@ def main():
     parser.add_argument("--held-yaw-scale", type=float, default=0.4)
 
     parser.add_argument("--ema-alpha", type=float, default=0.25)
+    
+
+    parser.add_argument(
+        "--k-yaw-d",
+        type=float,
+        default=0.0,
+        help="Yaw derivative gain. 0 disables D term and keeps old pure-P behavior.",
+    )
+    parser.add_argument(
+        "--yaw-reverse-guard-error",
+        type=float,
+        default=0.07,
+        help="Above this |error_x|, the D term may reduce but not reverse yaw direction. 0 disables guard.",
+    )
+
+    parser.add_argument(
+        "--error-ema-alpha",
+        type=float,
+        default=0.4,
+        help="EMA alpha for smoothing error_x before derivative calculation.",
+    )
+    parser.add_argument(
+        "--yaw-gain-distance-enable",
+        action="store_true",
+        help="Enable distance-dependent yaw gain scaling.",
+    )
+
+    parser.add_argument(
+        "--yaw-gain-near-distance",
+        type=float,
+        default=2.4,
+        help="At or below this distance, yaw gain uses near scale.",
+    )
+
+    parser.add_argument(
+        "--yaw-gain-far-distance",
+        type=float,
+        default=4.0,
+        help="At or above this distance, yaw gain uses far scale.",
+    )
+
+    parser.add_argument(
+        "--yaw-gain-near-scale",
+        type=float,
+        default=1.0,
+        help="Yaw gain scale at near distance.",
+    )
+
+    parser.add_argument(
+        "--yaw-gain-far-scale",
+        type=float,
+        default=0.60,
+        help="Yaw gain scale at far distance.",
+    )
 
     parser.add_argument("--max-delta-x-per-sec", type=float, default=180.0)
     parser.add_argument("--max-delta-r-per-sec", type=float, default=220.0)
@@ -447,6 +629,79 @@ def main():
     parser.add_argument("--log-csv", default=None)
     
     parser.add_argument("--seq-jump-warning-threshold", type=int, default=10)
+    
+    parser.add_argument(
+        "--hard-stop-on-held",
+        action="store_true",
+        help="Immediately reset command filter and stop when observation is held/stale.",
+    )
+
+    parser.add_argument(
+        "--forward-boost-distance-enable",
+        action="store_true",
+        help="Enable distance-dependent forward boost.",
+    )
+
+    parser.add_argument(
+        "--forward-boost-near-distance",
+        type=float,
+        default=2.8,
+        help="At or below this distance, forward boost uses near scale.",
+    )
+
+    parser.add_argument(
+        "--forward-boost-far-distance",
+        type=float,
+        default=4.3,
+        help="At or above this distance, forward boost uses far scale.",
+    )
+
+    parser.add_argument(
+        "--forward-boost-near-scale",
+        type=float,
+        default=1.0,
+        help="Forward boost scale at near distance.",
+    )
+
+    parser.add_argument(
+        "--forward-boost-far-scale",
+        type=float,
+        default=1.5,
+        help="Forward boost scale at far distance.",
+    )
+    parser.add_argument(
+        "--forward-gate-distance-enable",
+        action="store_true",
+        help="Enable distance-dependent forward gate scales.",
+    )
+
+    parser.add_argument(
+        "--forward-gate-near-distance",
+        type=float,
+        default=2.4,
+        help="At or below this distance, use normal near forward gate scales.",
+    )
+
+    parser.add_argument(
+        "--forward-gate-far-distance",
+        type=float,
+        default=4.3,
+        help="At or above this distance, use far forward gate scales.",
+    )
+
+    parser.add_argument(
+        "--forward-gate-far-mid-scale",
+        type=float,
+        default=0.90,
+        help="Forward gate mid scale at far distance.",
+    )
+
+    parser.add_argument(
+        "--forward-gate-far-min-scale",
+        type=float,
+        default=0.70,
+        help="Forward gate min scale at far distance.",
+    )
 
     args = parser.parse_args()
 
@@ -459,6 +714,9 @@ def main():
     print(f"desired_distance         : {args.desired_distance}")
     print(f"k_forward                : {args.k_forward}")
     print(f"k_yaw                    : {args.k_yaw}")
+    print(f"k_yaw_d                  : {args.k_yaw_d}")
+    print(f"yaw_reverse_guard_error  : {args.yaw_reverse_guard_error}")
+    print(f"error_ema_alpha          : {args.error_ema_alpha}")
     print(f"yaw_sign                 : {args.yaw_sign}")
     print(f"max_x                    : {args.max_x}")
     print(f"max_r                    : {args.max_r}")
@@ -470,6 +728,22 @@ def main():
     print(f"invalid_decay_seconds    : {args.invalid_decay_seconds}")
     print(f"arm enabled              : {args.arm}")
     print(f"Vertical control         : disabled, z={args.z_neutral} fixed")
+    print(f"hard_stop_on_held        : {args.hard_stop_on_held}")
+    print(f"yaw_gain_distance_enable : {args.yaw_gain_distance_enable}")
+    print(f"yaw_gain_near_distance   : {args.yaw_gain_near_distance}")
+    print(f"yaw_gain_far_distance    : {args.yaw_gain_far_distance}")
+    print(f"yaw_gain_near_scale      : {args.yaw_gain_near_scale}")
+    print(f"yaw_gain_far_scale       : {args.yaw_gain_far_scale}")
+    print(f"forward_boost_enable     : {args.forward_boost_distance_enable}")
+    print(f"forward_boost_near_dist  : {args.forward_boost_near_distance}")
+    print(f"forward_boost_far_dist   : {args.forward_boost_far_distance}")
+    print(f"forward_boost_near_scale : {args.forward_boost_near_scale}")
+    print(f"forward_boost_far_scale  : {args.forward_boost_far_scale}")
+    print(f"forward_gate_distance    : {args.forward_gate_distance_enable}")
+    print(f"forward_gate_near_dist   : {args.forward_gate_near_distance}")
+    print(f"forward_gate_far_dist    : {args.forward_gate_far_distance}")
+    print(f"forward_gate_far_mid     : {args.forward_gate_far_mid_scale}")
+    print(f"forward_gate_far_min     : {args.forward_gate_far_min_scale}")
     print("")
 
     csv_file = None
@@ -609,7 +883,16 @@ def main():
                     target_x, target_r, error_x, distance_error = compute_target_command(
                         latest_packet,
                         args,
+                        dt,
                     )
+                    held_now = packet_bool(
+                        latest_packet.get("held_observation", latest_packet.get("held", False))
+                    )
+
+                    if args.hard_stop_on_held and held_now:
+                        target_x = 0.0
+                        target_r = 0.0
+                        hard_stop = True
 
                 else:
                     if invalid_started_at is None:
