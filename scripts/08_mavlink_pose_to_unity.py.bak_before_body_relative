@@ -33,18 +33,6 @@ def main():
 
     parser.add_argument("--rate", type=float, default=60.0)
     parser.add_argument("--scale", type=float, default=1.0)
-    parser.add_argument(
-        "--body-frame-relative",
-        action="store_true",
-        help=(
-            "Convert NED position delta into the robot's initial body frame "
-            "before sending to Unity. Output convention: UDP x=lateral, y=forward, z=up."
-        ),
-    )
-
-    parser.add_argument("--body-forward-sign", type=float, default=1.0)
-    parser.add_argument("--body-lateral-sign", type=float, default=-1.0)
-    parser.add_argument("--body-up-sign", type=float, default=1.0)
 
     # Incoming frame sent to Unity receiver:
     # x = forward, y = right, z = up
@@ -77,10 +65,6 @@ def main():
     print(f"rate               : {args.rate} Hz")
     print(f"scale              : {args.scale}")
     print(f"yaw_sign           : {args.yaw_sign}")
-    print(f"body_frame_relative: {args.body_frame_relative}")
-    print(f"body_forward_sign  : {args.body_forward_sign}")
-    print(f"body_lateral_sign  : {args.body_lateral_sign}")
-    print(f"body_up_sign       : {args.body_up_sign}")
     print(f"position_only      : {args.position_only}")
     print(f"yaw_only           : {args.yaw_only}")
     print("")
@@ -187,52 +171,14 @@ def main():
                 dy_e = float(latest_pos.y) - origin_pos[1]
                 dz_d = float(latest_pos.z) - origin_pos[2]
 
-                if args.body_frame_relative:
-                    # LOCAL_POSITION_NED:
-                    #   x = North
-                    #   y = East
-                    #   z = Down
-                    #
-                    # ATTITUDE yaw:
-                    #   yaw=0   -> facing North
-                    #   yaw=+90 -> facing East
-                    #
-                    # First yaw is used as the initial body-frame reference.
-                    # This removes the dependency on always starting exactly facing East.
+                # Convert NED relative position to existing Python/Unity UDP frame:
+                # +X forward, +Y right, +Z up
+                x_forward = dx_n
+                y_right = dy_e
+                z_up = -dz_d
 
-                    yaw0 = origin_yaw
-                    cos_yaw0 = math.cos(yaw0)
-                    sin_yaw0 = math.sin(yaw0)
-
-                    # World/NED delta projected onto initial body axes.
-                    body_forward = cos_yaw0 * dx_n + sin_yaw0 * dy_e
-                    body_right = -sin_yaw0 * dx_n + cos_yaw0 * dy_e
-                    body_up = -dz_d
-
-                    # Unity receiver synthetic axis probe showed:
-                    #   UDP x +1 -> camera left
-                    #   UDP y +1 -> camera forward
-                    #   UDP z +1 -> camera up
-                    #
-                    # Therefore:
-                    #   body_forward -> UDP y
-                    #   body_right   -> UDP x, with default negative sign
-                    #   body_up      -> UDP z
-                    x_forward = args.body_lateral_sign * body_right
-                    y_right = args.body_forward_sign * body_forward
-                    z_up = args.body_up_sign * body_up
-
-                else:
-                    # Legacy mapping:
-                    # Convert NED relative position to existing Python/Unity UDP frame.
-                    # Old assumption:
-                    #   +X forward, +Y right, +Z up
-                    x_forward = dx_n
-                    y_right = dy_e
-                    z_up = -dz_d
-
-                    if args.swap_xy:
-                        x_forward, y_right = y_right, x_forward
+                if args.swap_xy:
+                    x_forward, y_right = y_right, x_forward
 
                 x_forward = maybe_invert(x_forward, args.invert_x)
                 y_right = maybe_invert(y_right, args.invert_y)
@@ -240,7 +186,7 @@ def main():
 
                 x_forward *= args.scale
                 y_right *= args.scale
-                z_up *= args.scale                
+                z_up *= args.scale
 
                 roll = wrap_deg(deg(float(latest_att.roll) - origin_roll)) * args.roll_sign
                 pitch = wrap_deg(deg(float(latest_att.pitch) - origin_pitch)) * args.pitch_sign
@@ -277,7 +223,7 @@ def main():
                     last_print = now
                     print(
                         f"seq={seq:06d} "
-                        f"udp_xyz=({x_forward:+.3f}, {y_right:+.3f}, {z_up:+.3f}) "
+                        f"pos=({x_forward:+.3f}, {y_right:+.3f}, {z_up:+.3f}) "
                         f"rpy=({roll:+.1f}, {pitch:+.1f}, {yaw:+.1f}) "
                         f"raw_ned=({latest_pos.x:+.3f}, {latest_pos.y:+.3f}, {latest_pos.z:+.3f})"
                     )
