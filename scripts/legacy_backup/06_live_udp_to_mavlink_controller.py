@@ -245,27 +245,12 @@ def validate_observation(packet, args):
     if not math.isfinite(estimated_distance):
         return False, "NONFINITE_DISTANCE"
 
-    # Mission sanity checks:
-    # Reject false detections that look unrealistically close/far
-    # or too far from the image center.
-    if estimated_distance < args.min_valid_distance:
-        return False, "DISTANCE_TOO_SMALL"
-
-    if estimated_distance > args.max_valid_distance:
-        return False, "DISTANCE_TOO_LARGE"
-
-    if abs(error_x) > args.max_abs_error_x:
-        return False, "ERROR_X_TOO_LARGE"
-
     return True, "OK"
 
 _yaw_d_state = {
     "prev_error_x_smooth": None,
     "error_x_smooth": None,
 }
-def reset_yaw_d_state():
-    _yaw_d_state["prev_error_x_smooth"] = None
-    _yaw_d_state["error_x_smooth"] = None
 
 def compute_target_command(packet, args, dt):
     error_x = float(packet["error_norm"][0])
@@ -350,7 +335,7 @@ def compute_target_command(packet, args, dt):
 
     target_x = args.k_forward * distance_error_db
 
-    target_x = clamp(target_x, -args.max_reverse_x, args.max_x)
+    target_x = clamp(target_x, -args.max_x, args.max_x)
     target_r = clamp(target_r, -args.max_r, args.max_r)
 
     # Yaw-priority / forward-gating:
@@ -387,15 +372,6 @@ def compute_target_command(packet, args, dt):
         forward_gate_scale = gate_mid_scale
     else:
         forward_gate_scale = 1.0
-    # Mission chase mode:
-    # If the target is already far away, do not let yaw-priority gate
-    # slow forward motion too much. Otherwise the leader escapes.
-    if (
-        args.far_chase_distance > 0.0
-        and estimated_distance >= args.far_chase_distance
-        and target_x > 0.0
-    ):
-        forward_gate_scale = max(forward_gate_scale, args.far_chase_gate_scale)    
 
     # Apply yaw-priority forward gate.
     # Only reduce positive forward motion; do not weaken backward correction if too close.
@@ -727,15 +703,6 @@ def main():
         help="Forward gate min scale at far distance.",
     )
 
-    parser.add_argument("--min-valid-distance", type=float, default=0.0)
-    parser.add_argument("--max-valid-distance", type=float, default=999.0)
-    parser.add_argument("--max-abs-error-x", type=float, default=999.0)
-
-    parser.add_argument("--max-reverse-x", type=float, default=30.0)
-
-    parser.add_argument("--far-chase-distance", type=float, default=0.0)
-    parser.add_argument("--far-chase-gate-scale", type=float, default=1.0)
-
     args = parser.parse_args()
 
     print("=== Live UDP to MAVLink Controller V2 ===")
@@ -777,12 +744,6 @@ def main():
     print(f"forward_gate_far_dist    : {args.forward_gate_far_distance}")
     print(f"forward_gate_far_mid     : {args.forward_gate_far_mid_scale}")
     print(f"forward_gate_far_min     : {args.forward_gate_far_min_scale}")
-    print(f"min_valid_distance       : {args.min_valid_distance}")
-    print(f"max_valid_distance       : {args.max_valid_distance}")
-    print(f"max_abs_error_x          : {args.max_abs_error_x}")
-    print(f"max_reverse_x            : {args.max_reverse_x}")
-    print(f"far_chase_distance       : {args.far_chase_distance}")
-    print(f"far_chase_gate_scale     : {args.far_chase_gate_scale}")
     print("")
 
     csv_file = None
@@ -901,14 +862,12 @@ def main():
             distance_error = None
 
             if latest_packet is None:
-                reset_yaw_d_state()
                 hard_stop = True
                 state = "NO_PACKET"
                 validation_reason = latest_parse_error or "NO_PACKET"
                 invalid_started_at = None
 
             elif packet_age is not None and packet_age > args.packet_timeout:
-                reset_yaw_d_state()
                 hard_stop = True
                 state = "PACKET_TIMEOUT"
                 validation_reason = "PACKET_TIMEOUT"
@@ -918,36 +877,24 @@ def main():
                 is_valid, validation_reason = validate_observation(latest_packet, args)
 
                 if is_valid:
+                    invalid_started_at = None
+                    state = "TRACK"
+
+                    target_x, target_r, error_x, distance_error = compute_target_command(
+                        latest_packet,
+                        args,
+                        dt,
+                    )
                     held_now = packet_bool(
                         latest_packet.get("held_observation", latest_packet.get("held", False))
                     )
 
-                    if held_now:
-                        # Held packets are stale or reconstructed observations.
-                        # Do not use them to update yaw D-state or distance control.
-                        reset_yaw_d_state()
-                        invalid_started_at = None
-                        state = "HELD_DECAY"
+                    if args.hard_stop_on_held and held_now:
                         target_x = 0.0
                         target_r = 0.0
-                        hard_stop = False
-
-                    else:
-                        invalid_started_at = None
-                        state = "TRACK"
-
-                        target_x, target_r, error_x, distance_error = compute_target_command(
-                            latest_packet,
-                            args,
-                            dt,
-                        )
+                        hard_stop = True
 
                 else:
-                    # Invalid packets must not leave old yaw derivative memory alive.
-                    # Otherwise the first valid packet after a detection loss can create
-                    # a wrong D-term kick.
-                    reset_yaw_d_state()
-
                     if invalid_started_at is None:
                         invalid_started_at = now
 

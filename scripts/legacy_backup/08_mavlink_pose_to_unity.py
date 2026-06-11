@@ -34,19 +34,6 @@ def main():
     parser.add_argument("--rate", type=float, default=60.0)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument(
-        "--scale-horizontal",
-        type=float,
-        default=None,
-        help="Scale for horizontal Unity motion. If omitted, uses --scale.",
-    )
-
-    parser.add_argument(
-        "--scale-vertical",
-        type=float,
-        default=None,
-        help="Scale for vertical/up-down Unity motion. If omitted, uses --scale.",
-    )    
-    parser.add_argument(
         "--body-frame-relative",
         action="store_true",
         help=(
@@ -82,14 +69,6 @@ def main():
 
     args = parser.parse_args()
 
-
-
-    if args.scale_horizontal is None:
-        args.scale_horizontal = args.scale
-
-    if args.scale_vertical is None:
-        args.scale_vertical = args.scale
-
     period = 1.0 / args.rate
 
     print("=== MAVLink Pose to Unity Bridge ===")
@@ -97,8 +76,6 @@ def main():
     print(f"Unity target       : {args.unity_ip}:{args.unity_port}")
     print(f"rate               : {args.rate} Hz")
     print(f"scale              : {args.scale}")
-    print(f"scale_horizontal   : {args.scale_horizontal}")
-    print(f"scale_vertical     : {args.scale_vertical}")
     print(f"yaw_sign           : {args.yaw_sign}")
     print(f"body_frame_relative: {args.body_frame_relative}")
     print(f"body_forward_sign  : {args.body_forward_sign}")
@@ -261,9 +238,9 @@ def main():
                 y_right = maybe_invert(y_right, args.invert_y)
                 z_up = maybe_invert(z_up, args.invert_z)
 
-                x_forward *= args.scale_horizontal
-                y_right *= args.scale_horizontal
-                z_up *= args.scale_vertical             
+                x_forward *= args.scale
+                y_right *= args.scale
+                z_up *= args.scale                
 
                 roll = wrap_deg(deg(float(latest_att.roll) - origin_roll)) * args.roll_sign
                 pitch = wrap_deg(deg(float(latest_att.pitch) - origin_pitch)) * args.pitch_sign
