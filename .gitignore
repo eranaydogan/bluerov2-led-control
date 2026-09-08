@@ -21,3 +21,7 @@ received_packets/
 # OS
 .DS_Store
 Thumbs.db
+
+# Backup files
+*.bak
+*.bak_*
