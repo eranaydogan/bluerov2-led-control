@@ -1,3 +1,12 @@
+> **Archived development plan**
+>
+> This document reflects an earlier stage of the project and is preserved as
+> development history. Several milestones described here — including live Unity
+> capture, Gazebo-to-Unity pose feedback, closed-loop yaw testing, and
+> distance-gated following — have since been implemented.
+>
+> See the main [README](../README.md) and `progress_log.md` for the current system.
+
 Next Steps
 Current Status
 
