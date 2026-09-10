@@ -1,3 +1,13 @@
+> **Legacy setup notes**
+>
+> This document documents earlier integration and offline-video validation steps.
+> The project has since progressed to live Unity perception, Gazebo-to-Unity pose
+> feedback, and the current distance-gated controller.
+>
+> Some example parameters below are historical tuning values rather than current
+> recommended settings. See the main [README](../README.md) for the current architecture.
+
+
 # Setup and Run
 
 This document explains how to start the BlueROV2 LED-following control-side environment, verify the Gazebo/ArduSub connection, and run the current UDP-to-MAVLink controller tests.
